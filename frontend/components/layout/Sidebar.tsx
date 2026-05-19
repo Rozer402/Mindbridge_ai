@@ -1,0 +1,105 @@
+"use client";
+
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
+import { Brain, LayoutDashboard, MessageCircle, Heart, Settings, LogOut, Plus } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { clearTokens } from "@/lib/api";
+import { useChatStore } from "@/store/chatStore";
+import { chatApi } from "@/lib/api";
+import { useEffect } from "react";
+
+const nav = [
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/dashboard/chat", label: "Chat", icon: MessageCircle },
+  { href: "/dashboard/mood", label: "Mood", icon: Heart },
+  { href: "/dashboard/settings", label: "Settings", icon: Settings },
+];
+
+export function Sidebar() {
+  const pathname = usePathname();
+  const router = useRouter();
+  const { sessions, setSessions, setActiveSession, setMessages, reset } = useChatStore();
+
+  useEffect(() => {
+    chatApi.getSessions().then((r) => setSessions(r.data)).catch(() => {});
+  }, [setSessions]);
+
+  const newChat = () => {
+    reset();
+    router.push("/dashboard/chat");
+  };
+
+  const openSession = async (id: string) => {
+    setActiveSession(id);
+    const { data } = await chatApi.getMessages(id);
+    setMessages(data);
+    router.push("/dashboard/chat");
+  };
+
+  const logout = () => {
+    clearTokens();
+    reset();
+    router.push("/login");
+  };
+
+  return (
+    <aside className="hidden md:flex w-60 flex-col border-r border-slate-200 bg-white h-full">
+      <div className="p-4 border-b border-slate-100">
+        <Link href="/dashboard" className="flex items-center gap-2 font-semibold text-brand-700">
+          <Brain className="h-6 w-6" />
+          MindBridge
+        </Link>
+      </div>
+      <nav className="flex-1 p-3 space-y-1">
+        {nav.map(({ href, label, icon: Icon }) => (
+          <Link
+            key={href}
+            href={href}
+            className={cn(
+              "flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors",
+              pathname === href ? "bg-brand-50 text-brand-700 font-medium" : "text-slate-600 hover:bg-slate-50"
+            )}
+          >
+            <Icon className="h-4 w-4" />
+            {label}
+          </Link>
+        ))}
+      </nav>
+      {pathname.includes("/chat") && (
+        <div className="px-3 pb-2">
+          <button
+            type="button"
+            onClick={newChat}
+            className="flex w-full items-center gap-2 rounded-lg bg-brand-600 px-3 py-2 text-sm text-white hover:bg-brand-700"
+          >
+            <Plus className="h-4 w-4" />
+            New chat
+          </button>
+          <div className="mt-3 max-h-48 overflow-y-auto space-y-1">
+            {sessions.slice(0, 10).map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => openSession(s.id)}
+                className="w-full truncate rounded px-2 py-1.5 text-left text-xs text-slate-600 hover:bg-slate-100"
+              >
+                {s.title}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="p-3 border-t border-slate-100">
+        <button
+          type="button"
+          onClick={logout}
+          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-600 hover:bg-slate-50"
+        >
+          <LogOut className="h-4 w-4" />
+          Log out
+        </button>
+      </div>
+    </aside>
+  );
+}
