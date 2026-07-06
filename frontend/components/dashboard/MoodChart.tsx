@@ -34,15 +34,15 @@ export function MoodChart({ data }: { data: MoodPoint[] }) {
       <AreaChart data={chartData}>
         <defs>
           <linearGradient id="moodGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.3} />
-            <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0} />
+            <stop offset="5%" stopColor="#5B7A6E" stopOpacity={0.3} />
+            <stop offset="95%" stopColor="#5B7A6E" stopOpacity={0} />
           </linearGradient>
         </defs>
-        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+        <CartesianGrid strokeDasharray="3 3" stroke="#E5E0D2" />
         <XAxis dataKey="date" tick={{ fontSize: 11 }} />
         <YAxis domain={[1, 10]} tick={{ fontSize: 11 }} />
         <Tooltip />
-        <Area type="monotone" dataKey="score" stroke="#7c3aed" fill="url(#moodGrad)" strokeWidth={2} />
+        <Area type="monotone" dataKey="score" stroke="#5B7A6E" fill="url(#moodGrad)" strokeWidth={2} />
       </AreaChart>
     </ResponsiveContainer>
   );

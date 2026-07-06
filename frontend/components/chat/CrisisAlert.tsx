@@ -16,27 +16,27 @@ const HOTLINES = [
 
 export function CrisisAlert({ onAcknowledge }: Props) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="max-w-md w-full rounded-2xl border-4 border-red-500 bg-white p-6 shadow-2xl">
-        <div className="flex items-center gap-3 text-red-600 mb-4">
-          <AlertTriangle className="h-8 w-8" />
-          <h2 className="text-xl font-bold">You deserve immediate support</h2>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/80 p-4">
+      <div className="max-w-md w-full rounded-2xl border-2 border-crisis bg-parchment p-6 shadow-none">
+        <div className="flex items-center gap-3 mb-4">
+          <AlertTriangle className="h-8 w-8 text-crisis" />
+          <h2 className="font-display text-xl text-ink">You deserve immediate support</h2>
         </div>
-        <p className="text-slate-700 mb-4 text-sm leading-relaxed">
+        <p className="font-sans text-ink/80 mb-4 text-sm leading-relaxed">
           What you&apos;re feeling is serious. Please reach out to a trained counselor right now.
         </p>
         <ul className="space-y-2 mb-6">
           {HOTLINES.map((h) => (
             <li key={h.number} className="flex items-center gap-2 text-sm">
-              <Phone className="h-4 w-4 text-red-500 shrink-0" />
-              <span className="font-medium">{h.name}:</span>
-              <a href={`tel:${h.number.replace(/-/g, "")}`} className="text-brand-600 underline">
+              <Phone className="h-4 w-4 text-crisis shrink-0" />
+              <span className="font-sans font-medium text-ink">{h.name}:</span>
+              <a href={`tel:${h.number.replace(/-/g, "")}`} className="text-sage hover:text-ink underline transition-colors duration-300 ease-mb-ease">
                 {h.number}
               </a>
             </li>
           ))}
         </ul>
-        <Button variant="destructive" className="w-full" onClick={onAcknowledge}>
+        <Button className="w-full py-2.5 bg-crisis text-white hover:bg-crisis/90 rounded-full transition-colors duration-300 ease-mb-ease" onClick={onAcknowledge}>
           I understand — show me the message
         </Button>
       </div>

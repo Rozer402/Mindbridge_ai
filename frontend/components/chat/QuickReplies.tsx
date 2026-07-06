@@ -14,7 +14,7 @@ export function QuickReplies({ suggestions, onSelect }: Props) {
           key={s}
           type="button"
           onClick={() => onSelect(s)}
-          className="rounded-full border border-brand-200 bg-brand-50 px-3 py-1 text-xs text-brand-700 hover:bg-brand-100 transition-colors"
+          className="rounded-full border border-sage/30 text-sage px-3 py-1 text-xs hover:bg-sage/10 transition-colors duration-300 ease-mb-ease"
         >
           {s}
         </button>

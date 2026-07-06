@@ -36,7 +36,7 @@ export function ChatInput({ onSend, disabled }: Props) {
           disabled={disabled}
           placeholder="Share what's on your mind..."
           rows={1}
-          className="flex-1 resize-none rounded-xl border border-slate-200 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 min-h-[44px] max-h-32"
+          className="flex-1 resize-none rounded-xl border border-ink/15 px-4 py-3 text-sm text-ink placeholder:text-warm focus:outline-none focus:ring-1 focus:ring-sage focus:border-sage min-h-[44px] max-h-32 transition-colors duration-300 ease-mb-ease"
         />
         <Button onClick={submit} disabled={disabled || !text.trim()} size="default" className="shrink-0">
           <Send className="h-4 w-4" />

@@ -46,8 +46,8 @@ export default function MoodPage() {
   };
 
   return (
-    <div className="h-full overflow-y-auto p-6 max-w-3xl mx-auto">
-      <h1 className="text-2xl font-bold text-slate-900 mb-6">Mood tracker</h1>
+    <div className="h-full overflow-y-auto p-6 max-w-3xl mx-auto bg-parchment">
+      <h1 className="font-display text-2xl text-ink mb-6">Mood tracker</h1>
 
       <Card className="mb-6">
         <CardHeader>
@@ -62,7 +62,7 @@ export default function MoodPage() {
               max={10}
               value={score}
               onChange={(e) => setScore(Number(e.target.value))}
-              className="w-full mt-2 accent-brand-600"
+              className="w-full mt-2 accent-sage"
             />
           </div>
           <div>
@@ -73,8 +73,8 @@ export default function MoodPage() {
                   key={l}
                   type="button"
                   onClick={() => setLabel(l)}
-                  className={`rounded-full px-3 py-1 text-sm capitalize border ${
-                    label === l ? "bg-brand-600 text-white border-brand-600" : "border-slate-200"
+                  className={`rounded-full px-3 py-1 text-sm capitalize border transition-colors duration-300 ease-mb-ease ${
+                    label === l ? "bg-sage text-parchment border-sage" : "border-ink/20 text-ink/70 hover:bg-ink/5"
                   }`}
                 >
                   {l}
@@ -88,19 +88,19 @@ export default function MoodPage() {
               id="notes"
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-slate-200 p-3 text-sm min-h-[80px]"
+              className="mt-1 w-full rounded-xl border border-ink/15 p-3 text-sm min-h-[80px] focus:border-sage focus:ring-1 focus:ring-sage outline-none bg-white text-ink placeholder:text-warm transition-colors duration-300 ease-mb-ease"
               placeholder="What influenced your mood today?"
             />
           </div>
-          <Button onClick={submit} disabled={saving}>
+          <Button onClick={submit} disabled={saving} className="bg-sage text-parchment hover:bg-ink rounded-full transition-colors duration-300 ease-mb-ease">
             {saving ? "Saving..." : "Save mood"}
           </Button>
         </CardContent>
       </Card>
 
       {stats && (
-        <p className="text-sm text-slate-600 mb-4">
-          Weekly average: <strong>{stats.avg_score.toFixed(1)}</strong>/10
+        <p className="text-sm text-ink/60 mb-4">
+          Weekly average: <strong className="font-display text-lg text-ink">{stats.avg_score.toFixed(1)}</strong>/10
         </p>
       )}
 
@@ -120,11 +120,11 @@ export default function MoodPage() {
         <CardContent>
           <ul className="space-y-2">
             {history.map((log) => (
-              <li key={log.id} className="flex justify-between text-sm border-b border-slate-50 py-2">
-                <span>
+              <li key={log.id} className="flex justify-between text-sm border-b border-ink/10 py-2">
+                <span className="text-ink">
                   {log.mood_label} · {log.mood_score}/10
                 </span>
-                <span className="text-slate-400">{new Date(log.logged_at).toLocaleString()}</span>
+                <span className="text-ink/50">{new Date(log.logged_at).toLocaleString()}</span>
               </li>
             ))}
           </ul>

@@ -28,8 +28,8 @@ export default function SettingsPage() {
   };
 
   return (
-    <div className="h-full overflow-y-auto p-6 max-w-lg">
-      <h1 className="text-2xl font-bold mb-6">Settings</h1>
+    <div className="h-full overflow-y-auto p-6 max-w-lg bg-parchment mx-auto">
+      <h1 className="font-display text-2xl text-ink mb-6">Settings</h1>
       <Card>
         <CardHeader>
           <CardTitle>Profile</CardTitle>
@@ -54,7 +54,7 @@ export default function SettingsPage() {
               placeholder="Optional crisis contact"
             />
           </div>
-          <Button onClick={save}>{saved ? "Saved!" : "Save changes"}</Button>
+          <Button onClick={save} className="bg-sage text-parchment hover:bg-ink rounded-full transition-colors duration-300 ease-mb-ease">{saved ? "Saved!" : "Save changes"}</Button>
         </CardContent>
       </Card>
     </div>

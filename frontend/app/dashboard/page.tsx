@@ -21,18 +21,18 @@ export default function DashboardPage() {
   }, []);
 
   return (
-    <div className="h-full overflow-y-auto p-6">
-      <h1 className="text-2xl font-bold text-slate-900 mb-6">Dashboard</h1>
+    <div className="h-full overflow-y-auto p-6 bg-parchment">
+      <h1 className="font-display text-2xl text-ink mb-6">Dashboard</h1>
 
       <div className="grid gap-4 md:grid-cols-3 mb-6">
         <Card>
           <CardHeader>
-            <CardTitle className="text-sm font-medium text-slate-500">Wellness score (7d avg)</CardTitle>
+            <CardTitle className="font-mono-mb text-xs uppercase tracking-wide text-warm">Wellness score (7d avg)</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-3xl font-bold text-brand-700">
+            <p className="font-display text-4xl text-ink">
               {stats ? stats.avg_score.toFixed(1) : "—"}
-              <span className="text-base font-normal text-slate-400">/10</span>
+              <span className="text-base font-normal text-warm">/10</span>
             </p>
             {stats && (
               <p className="text-xs text-slate-500 mt-1 capitalize">Trend: {stats.trend}</p>
@@ -41,7 +41,7 @@ export default function DashboardPage() {
         </Card>
         <Card className="md:col-span-2">
           <CardHeader>
-            <CardTitle className="text-sm font-medium text-slate-500">Mood history (30 days)</CardTitle>
+            <CardTitle className="font-mono-mb text-xs uppercase tracking-wide text-warm">Mood history (30 days)</CardTitle>
           </CardHeader>
           <CardContent>
             <MoodChart data={history} />
@@ -51,13 +51,13 @@ export default function DashboardPage() {
 
       <div className="flex flex-wrap gap-3 mb-6">
         <Link href="/dashboard/chat">
-          <Button>
+          <Button className="bg-sage text-parchment hover:bg-ink rounded-full transition-colors duration-300 ease-mb-ease">
             <MessageCircle className="h-4 w-4 mr-2" />
             Start chat
           </Button>
         </Link>
         <Link href="/dashboard/mood">
-          <Button variant="outline">
+          <Button variant="outline" className="border border-ink/20 text-ink hover:bg-ink/5 rounded-full transition-colors duration-300 ease-mb-ease">
             <Heart className="h-4 w-4 mr-2" />
             Log mood
           </Button>
@@ -74,10 +74,10 @@ export default function DashboardPage() {
           ) : (
             <ul className="space-y-2">
               {sessions.map((s) => (
-                <li key={s.id} className="flex items-center justify-between rounded-lg border border-slate-100 px-4 py-3">
+                <li key={s.id} className="flex items-center justify-between rounded-xl border border-ink/8 px-4 py-3 hover:bg-white transition-colors duration-300 ease-mb-ease">
                   <div>
-                    <p className="font-medium text-sm text-slate-800 truncate max-w-xs">{s.title}</p>
-                    <p className="text-xs text-slate-400">
+                    <p className="font-medium text-sm text-ink truncate max-w-xs">{s.title}</p>
+                    <p className="text-xs text-ink/50">
                       {s.message_count} messages · {new Date(s.started_at).toLocaleDateString()}
                     </p>
                   </div>

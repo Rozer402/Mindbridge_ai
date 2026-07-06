@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Brain, LayoutDashboard, MessageCircle, Heart, Settings, LogOut, Plus } from "lucide-react";
+import { LayoutDashboard, MessageCircle, Heart, Settings, LogOut, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { clearTokens } from "@/lib/api";
 import { useChatStore } from "@/store/chatStore";
@@ -44,10 +44,9 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="hidden md:flex w-60 flex-col border-r border-slate-200 bg-white h-full">
-      <div className="p-4 border-b border-slate-100">
-        <Link href="/dashboard" className="flex items-center gap-2 font-semibold text-brand-700">
-          <Brain className="h-6 w-6" />
+    <aside className="hidden md:flex w-60 flex-col border-r border-white/5 bg-ink h-full">
+      <div className="p-4 border-b border-white/5">
+        <Link href="/dashboard" className="flex items-center gap-2 font-display text-lg text-parchment">
           MindBridge
         </Link>
       </div>
@@ -57,8 +56,8 @@ export function Sidebar() {
             key={href}
             href={href}
             className={cn(
-              "flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors",
-              pathname === href ? "bg-brand-50 text-brand-700 font-medium" : "text-slate-600 hover:bg-slate-50"
+              "flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors duration-300 ease-mb-ease",
+              pathname === href ? "bg-sage/15 text-gold font-medium" : "text-parchment/50 hover:bg-white/5 hover:text-parchment"
             )}
           >
             <Icon className="h-4 w-4" />
@@ -71,7 +70,7 @@ export function Sidebar() {
           <button
             type="button"
             onClick={newChat}
-            className="flex w-full items-center gap-2 rounded-lg bg-brand-600 px-3 py-2 text-sm text-white hover:bg-brand-700"
+            className="flex w-full items-center gap-2 rounded-full bg-gold px-3 py-2 text-sm text-gold-dark hover:bg-gold/90 transition-colors duration-300 ease-mb-ease"
           >
             <Plus className="h-4 w-4" />
             New chat
@@ -82,7 +81,7 @@ export function Sidebar() {
                 key={s.id}
                 type="button"
                 onClick={() => openSession(s.id)}
-                className="w-full truncate rounded px-2 py-1.5 text-left text-xs text-slate-600 hover:bg-slate-100"
+                className="w-full truncate rounded px-2 py-1.5 text-left text-xs text-parchment/40 hover:bg-white/5 hover:text-parchment/80 transition-colors duration-300 ease-mb-ease"
               >
                 {s.title}
               </button>
@@ -90,11 +89,11 @@ export function Sidebar() {
           </div>
         </div>
       )}
-      <div className="p-3 border-t border-slate-100">
+      <div className="p-3 border-t border-white/5">
         <button
           type="button"
           onClick={logout}
-          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-600 hover:bg-slate-50"
+          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-parchment/50 hover:bg-white/5 hover:text-parchment transition-colors duration-300 ease-mb-ease"
         >
           <LogOut className="h-4 w-4" />
           Log out
