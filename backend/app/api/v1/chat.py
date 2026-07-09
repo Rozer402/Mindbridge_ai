@@ -4,7 +4,7 @@ Chat API — REST endpoints for chat sessions and message exchange.
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 import uuid
 
 from app.database import get_db
@@ -88,14 +88,25 @@ async def send_message(
     )
     db.add(ai_msg)
 
-    # ── Update session metadata ──────────────────────────────────────────────
-    session.message_count += 2
-    if ai_result["is_crisis"]:
-        session.crisis_flagged = True
-    if session.message_count == 2:
-        # Use first message as session title
+    # ── Update session metadata via SQL to avoid race condition ────────────────
+    # In-Python session.message_count += 2 is unsafe under concurrent requests
+    # for the same session (two reads get same value, one write is lost).
+    is_first_message = (session.message_count == 0)
+    await db.execute(
+        update(ChatSession)
+        .where(ChatSession.id == session.id)
+        .values(
+            message_count=ChatSession.message_count + 2,
+            crisis_flagged=ai_result["is_crisis"] or ChatSession.crisis_flagged,
+        )
+    )
+    if is_first_message:
         title = data.message[:50] + ("..." if len(data.message) > 50 else "")
-        session.title = title
+        await db.execute(
+            update(ChatSession)
+            .where(ChatSession.id == session.id)
+            .values(title=title)
+        )
 
     await db.flush()
 

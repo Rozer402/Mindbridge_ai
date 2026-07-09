@@ -1,196 +1,134 @@
 """
-Train the MentalHealthClassifier on the corpus.
+train_classifier.py
+====================
+Trains the MentalHealthClassifier on top of frozen all-MiniLM-L6-v2 embeddings
+and saves the weights + label map for inference.
 
-Steps:
-1. Load corpus, embed every "context" string with the frozen MiniLM model
-   (same model already used by the embedder at runtime).
-2. Run stratified 5-fold cross-validation to get an honest accuracy/F1
-   estimate on data the model never trained on within each fold.
-3. Train a final model on the FULL dataset (this is the one that ships).
-4. Save weights + label map + a written evaluation report.
+Usage
+-----
+    cd backend
+    python scripts/train_classifier.py
 
-Run from backend/:
-    venv\\Scripts\\activate
-    python scripts\\train_classifier.py
+Output
+------
+    app/models/classifier_weights.pt   ← PyTorch state dict
+    app/models/label_map.json          ← category index ↔ name mapping
+
+Notes
+-----
+- The embedding model (MiniLM) is NOT fine-tuned. All embeddings are computed
+  once, cached, and reused across all epochs (fast training).
+- Adjust EPOCHS, HIDDEN_DIM, DROPOUT_P here if experimenting. Keep
+  CATEGORIES in sync with classifier.py to avoid inference mismatches.
+- After training, restart the FastAPI server to load the new weights.
 """
 
+from __future__ import annotations
+
 import json
+import logging
 import sys
 from pathlib import Path
-from collections import Counter
 
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import classification_report, confusion_matrix
 from sentence_transformers import SentenceTransformer
 
-# Make `app` importable when run as a script from backend/
+# ── Allow imports from app/ when run from the backend/ directory ──────────────
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from app.services.classifier import MentalHealthClassifier, CATEGORIES
 
-CORPUS_PATH = Path(__file__).resolve().parent.parent / "corpus" / "mental_health_corpus.json"
-MODELS_DIR = Path(__file__).resolve().parent.parent / "app" / "models"
-WEIGHTS_PATH = MODELS_DIR / "classifier_weights.pt"
-LABEL_MAP_PATH = MODELS_DIR / "label_map.json"
-REPORT_PATH = MODELS_DIR / "training_report.txt"
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger(__name__)
 
-EPOCHS = 300
-LR = 1e-3
-BATCH_SIZE = 16
-SEED = 42
+# ── Paths ─────────────────────────────────────────────────────────────────────
+BACKEND_DIR   = Path(__file__).resolve().parent.parent
+CORPUS_PATH   = BACKEND_DIR / "corpus" / "mental_health_corpus.json"
+WEIGHTS_PATH  = BACKEND_DIR / "app" / "models" / "classifier_weights.pt"
+LABEL_MAP_PATH = BACKEND_DIR / "app" / "models" / "label_map.json"
 
-torch.manual_seed(SEED)
-np.random.seed(SEED)
+# ── Hyperparameters ───────────────────────────────────────────────────────────
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+EPOCHS          = 50
+LEARNING_RATE   = 1e-3
+BATCH_SIZE      = 32
 
 
-def load_data():
+def load_corpus() -> tuple[list[str], list[int]]:
+    """Load corpus and return (texts, label_indices)."""
     with open(CORPUS_PATH, encoding="utf-8") as f:
-        corpus = json.load(f)
-
-    contexts = [e["context"] for e in corpus]
-    labels_str = [e["category"] for e in corpus]
+        data = json.load(f)
 
     cat_to_idx = {cat: i for i, cat in enumerate(CATEGORIES)}
-    labels = np.array([cat_to_idx[c] for c in labels_str])
+    texts, labels = [], []
 
-    print(f"Loaded {len(contexts)} examples across {len(set(labels_str))} categories.")
-    print("Category distribution:", Counter(labels_str))
+    skipped = 0
+    for item in data:
+        cat = item.get("category")
+        if cat not in cat_to_idx:
+            skipped += 1
+            continue
+        texts.append(item["context"])
+        labels.append(cat_to_idx[cat])
 
-    print("Embedding all contexts with all-MiniLM-L6-v2 (frozen, no training here)...")
-    encoder = SentenceTransformer("all-MiniLM-L6-v2")
-    embeddings = encoder.encode(contexts, normalize_embeddings=True, show_progress_bar=True)
-
-    return embeddings, labels, labels_str
+    logger.info(f"Loaded {len(texts)} training examples ({skipped} skipped — unknown category).")
+    return texts, labels
 
 
-def train_one_model(X_train, y_train, epochs=EPOCHS, lr=LR, batch_size=BATCH_SIZE):
+def train() -> None:
+    logger.info("Loading embedding model …")
+    embedder = SentenceTransformer(EMBEDDING_MODEL)
+
+    texts, labels = load_corpus()
+
+    logger.info("Computing embeddings (once, cached) …")
+    embeddings = embedder.encode(texts, normalize_embeddings=True, show_progress_bar=True)
+
+    X = torch.tensor(embeddings, dtype=torch.float32)
+    y = torch.tensor(labels, dtype=torch.long)
+
     model = MentalHealthClassifier()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     criterion = nn.CrossEntropyLoss()
 
-    X_t = torch.tensor(X_train, dtype=torch.float32)
-    y_t = torch.tensor(y_train, dtype=torch.long)
-
-    n = X_t.shape[0]
+    logger.info(f"Training for {EPOCHS} epochs …")
     model.train()
-    for epoch in range(epochs):
-        perm = torch.randperm(n)
-        total_loss = 0.0
-        for i in range(0, n, batch_size):
-            idx = perm[i:i + batch_size]
-            xb, yb = X_t[idx], y_t[idx]
-
+    for epoch in range(1, EPOCHS + 1):
+        # Mini-batch loop
+        indices = torch.randperm(len(X))
+        epoch_loss = 0.0
+        for start in range(0, len(X), BATCH_SIZE):
+            batch_idx = indices[start : start + BATCH_SIZE]
+            xb, yb = X[batch_idx], y[batch_idx]
             optimizer.zero_grad()
-            logits = model(xb)
-            loss = criterion(logits, yb)
+            loss = criterion(model(xb), yb)
             loss.backward()
             optimizer.step()
-            total_loss += loss.item() * len(idx)
+            epoch_loss += loss.item()
 
-    return model
+        if epoch % 10 == 0 or epoch == 1:
+            logger.info(f"  Epoch {epoch:3d}/{EPOCHS}  loss={epoch_loss:.4f}")
 
+    # ── Save ──────────────────────────────────────────────────────────────────
+    WEIGHTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), WEIGHTS_PATH)
+    logger.info(f"Saved weights → {WEIGHTS_PATH}")
 
-def evaluate_model(model, X_val, y_val):
+    label_map = {"categories": CATEGORIES}
+    with open(LABEL_MAP_PATH, "w", encoding="utf-8") as f:
+        json.dump(label_map, f, indent=2)
+    logger.info(f"Saved label map → {LABEL_MAP_PATH}")
+
+    # ── Quick accuracy check ──────────────────────────────────────────────────
     model.eval()
     with torch.no_grad():
-        X_t = torch.tensor(X_val, dtype=torch.float32)
-        logits = model(X_t)
-        preds = torch.argmax(logits, dim=-1).numpy()
-    return preds
-
-
-def cross_validate(X, y, labels_str, k=5):
-    print(f"\n{'='*60}\nRunning stratified {k}-fold cross-validation...\n{'='*60}")
-    skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=SEED)
-
-    all_true = []
-    all_pred = []
-    fold_accuracies = []
-
-    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), start=1):
-        X_train, X_val = X[train_idx], X[val_idx]
-        y_train, y_val = y[train_idx], y[val_idx]
-
-        model = train_one_model(X_train, y_train)
-        preds = evaluate_model(model, X_val, y_val)
-
-        acc = float(np.mean(preds == y_val))
-        fold_accuracies.append(acc)
-        all_true.extend(y_val.tolist())
-        all_pred.extend(preds.tolist())
-
-        print(f"Fold {fold}/{k}: accuracy = {acc:.3f}")
-
-    mean_acc = float(np.mean(fold_accuracies))
-    std_acc = float(np.std(fold_accuracies))
-    print(f"\nMean CV accuracy: {mean_acc:.3f} (+/- {std_acc:.3f})")
-
-    report = classification_report(
-        all_true, all_pred, target_names=CATEGORIES, digits=3, zero_division=0
-    )
-    cm = confusion_matrix(all_true, all_pred, labels=list(range(len(CATEGORIES))))
-
-    print("\nAggregated classification report (across all folds):")
-    print(report)
-
-    return mean_acc, std_acc, report, cm
-
-
-def format_confusion_matrix(cm) -> str:
-    lines = ["Confusion matrix (rows = true category, columns = predicted category)", ""]
-    header = "".join(f"{c[:4]:>7}" for c in CATEGORIES)
-    lines.append(" " * 14 + header)
-    for i, row in enumerate(cm):
-        row_str = "".join(f"{v:>7}" for v in row)
-        lines.append(f"{CATEGORIES[i]:<14}{row_str}")
-    return "\n".join(lines)
-
-
-def main():
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-
-    X, y, labels_str = load_data()
-
-    mean_acc, std_acc, report, cm = cross_validate(X, y, labels_str, k=5)
-
-    print(f"\n{'='*60}\nTraining FINAL model on the full dataset (this is what ships)...\n{'='*60}")
-    final_model = train_one_model(X, y, epochs=EPOCHS)
-
-    torch.save(final_model.state_dict(), WEIGHTS_PATH)
-    with open(LABEL_MAP_PATH, "w", encoding="utf-8") as f:
-        json.dump({"categories": CATEGORIES}, f, indent=2)
-
-    cm_str = format_confusion_matrix(cm)
-
-    report_text = f"""MindBridge AI — Classifier Training Report
-{'='*60}
-
-Dataset: {CORPUS_PATH.name}
-Total examples: {len(y)}
-Categories ({len(CATEGORIES)}): {', '.join(CATEGORIES)}
-
-Cross-validation: stratified 5-fold
-Mean accuracy: {mean_acc:.3f} (+/- {std_acc:.3f})
-
-Per-class precision / recall / F1 (aggregated across folds):
-{report}
-
-{cm_str}
-
-Final model trained on full dataset ({len(y)} examples, {EPOCHS} epochs)
-and saved to: {WEIGHTS_PATH.name}
-Label map saved to: {LABEL_MAP_PATH.name}
-"""
-
-    with open(REPORT_PATH, "w", encoding="utf-8") as f:
-        f.write(report_text)
-
-    print(f"\nSaved model weights to: {WEIGHTS_PATH}")
-    print(f"Saved label map to: {LABEL_MAP_PATH}")
-    print(f"Saved full report to: {REPORT_PATH}")
+        preds = torch.argmax(model(X), dim=1)
+        acc = (preds == y).float().mean().item()
+    logger.info(f"Training accuracy: {acc:.1%}")
+    logger.info("Done. Restart the backend server to load the new weights.")
 
 
 if __name__ == "__main__":
-    main()
+    train()

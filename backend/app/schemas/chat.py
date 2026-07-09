@@ -1,11 +1,17 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+from pydantic import ConfigDict
 from datetime import datetime
 import uuid
 
 
 class SendMessageRequest(BaseModel):
-    message: str
+    message: str = Field(..., min_length=1, max_length=1000, description="User message text")
     session_id: uuid.UUID | None = None
+
+    @field_validator("message", mode="before")
+    @classmethod
+    def strip_message(cls, v: str) -> str:
+        return v.strip()
 
 
 class MessageResponse(BaseModel):
@@ -16,8 +22,7 @@ class MessageResponse(BaseModel):
     is_crisis: bool
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ChatResponse(BaseModel):
@@ -49,5 +54,4 @@ class SessionResponse(BaseModel):
     crisis_flagged: bool
     started_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

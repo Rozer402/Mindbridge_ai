@@ -32,17 +32,19 @@ LABEL_MAP_PATH = MODELS_DIR / "label_map.json"
 # Below this confidence, treat the category prediction as too uncertain to
 # act on — ai_service falls back to plain cosine-similarity retrieval instead
 # of trusting the guess.
-CONFIDENCE_FALLBACK_THRESHOLD = 0.35
+CONFIDENCE_FALLBACK_THRESHOLD = 0.55
 
 # Confidence needed for the classifier's own "crisis" prediction to count as
 # an ADDITIONAL crisis signal, on top of (never instead of) the keyword check.
-#
-# ⚠ SAFETY NOTE: Raised from 0.78 → 0.82 to eliminate false positives on
-# short/vague messages ("yes", "okay", "I don't know") that scored ~0.6 and
-# were incorrectly triggering crisis protocol. The keyword-based check in
-# crisis_service.py remains the hard safety net (100% recall on known phrases)
-# and is completely unaffected by this threshold.
-CRISIS_CONFIDENCE_THRESHOLD = 0.82
+CRISIS_CONFIDENCE_THRESHOLD = 0.75
+
+# Messages shorter than this many words carry almost no semantic content
+# (e.g. "yes", "I don't know", "what did I say before?") — the classifier's
+# confidence number can look deceptively high on these even when it's really
+# just guessing. Below this length, neither the crisis flag nor the
+# category-based retrieval should trust the classifier's prediction at all,
+# regardless of confidence score.
+MIN_WORDS_FOR_CLASSIFIER_TRUST = 4
 
 # Number of MC Dropout forward passes used to estimate confidence/uncertainty.
 # The model is tiny (~28K params), so 20 passes adds negligible latency.

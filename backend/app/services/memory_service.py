@@ -1,19 +1,20 @@
 """
 MemoryService — Redis-backed Conversation Memory
 =================================================
-Stores the last N messages per chat session in Redis as a JSON list.
-TTL is applied on every write so idle sessions are auto-expired.
+Stores the last N messages per chat session as a Redis **List** (newest last).
+All writes are atomic RPUSH+LTRIM pipelines — no read-modify-write race.
+TTL is refreshed on every write so idle sessions are auto-expired.
 
 Design decisions
 ----------------
 * Key schema : "mb:memory:{session_id}"  (easy to namespace / flush)
-* Storage    : JSON-encoded list of message dicts, newest at the END.
-               We cap at MAX_HISTORY entries (user + assistant combined).
+* Storage    : Redis List; each element is a JSON-encoded message dict.
+               RPUSH to append, LTRIM to cap, LRANGE to read — all O(1)/O(N).
+* Atomicity  : RPUSH + LTRIM + EXPIRE run in a single pipeline (no race).
 * TTL        : Reset on every write — 24 hours by default.
-               Idle sessions are garbage-collected automatically.
-* Graceful   : If Redis is unavailable the service returns empty history
-               and logs a warning — the chat pipeline still works, just
-               without memory until Redis recovers.
+* Graceful   : If Redis is unavailable the service returns empty history and
+               the chat pipeline continues without memory until Redis recovers.
+               The _available flag is updated on every operation failure.
 
 Message dict schema stored in Redis
 --------------------------------------
@@ -49,7 +50,7 @@ TTL_SECONDS      = 86_400   # 24 hours — reset on every write
 
 class MemoryService:
     """
-    Async Redis-backed conversation memory.
+    Async Redis-backed conversation memory using atomic list operations.
 
     Lifecycle
     ---------
@@ -74,7 +75,6 @@ class MemoryService:
                 socket_connect_timeout=3,
                 socket_timeout=3,
             )
-            # Ping to verify the connection is live
             await self._client.ping()
             self._available = True
             logger.info(
@@ -99,32 +99,16 @@ class MemoryService:
     def _build_key(session_id: str) -> str:
         return f"{REDIS_KEY_PREFIX}{session_id}"
 
-    async def _safe_get(self, key: str) -> list[dict]:
-        """Fetch and deserialise history list; returns [] on any error."""
-        try:
-            raw = await self._client.get(key)
-            if raw:
-                return json.loads(raw)
-        except Exception as exc:
-            logger.warning(f"[MemoryService] Read error for {key}: {exc}")
-        return []
-
-    async def _safe_set(self, key: str, history: list[dict]) -> None:
-        """Serialise and store history list with TTL; silently catches errors."""
-        try:
-            await self._client.setex(
-                key,
-                TTL_SECONDS,
-                json.dumps(history, ensure_ascii=False),
-            )
-        except Exception as exc:
-            logger.warning(f"[MemoryService] Write error for {key}: {exc}")
+    def _mark_unavailable(self, exc: Exception, context: str) -> None:
+        """Log the failure and mark service as unavailable for future checks."""
+        logger.warning(f"[MemoryService] {context}: {exc}")
+        self._available = False
 
     # ── Public API ───────────────────────────────────────────────────────────
 
     @property
     def available(self) -> bool:
-        """True when the Redis connection is live."""
+        """True when the Redis connection is currently considered live."""
         return self._available
 
     async def get_history(
@@ -134,15 +118,19 @@ class MemoryService:
     ) -> list[dict]:
         """
         Return the last `limit` messages for this session.
-        Each item has keys: role, content, category, confidence, is_crisis, timestamp.
+        Uses LRANGE to read the tail of the list — O(limit), not O(N).
         Returns [] when Redis is unavailable or the session has no history.
         """
-        if not self._available:
+        if not self._available or not self._client:
             return []
         key = self._build_key(session_id)
-        history = await self._safe_get(key)
-        # Return the most recent `limit` messages
-        return history[-limit:] if len(history) > limit else history
+        try:
+            # LRANGE -limit -1 gives the last `limit` elements
+            raw_items = await self._client.lrange(key, -limit, -1)
+            return [json.loads(item) for item in raw_items]
+        except Exception as exc:
+            self._mark_unavailable(exc, f"Read error for {key}")
+            return []
 
     async def append_message(
         self,
@@ -155,8 +143,14 @@ class MemoryService:
         is_crisis: bool = False,
     ) -> None:
         """
-        Append one message to the session history, capping at MAX_HISTORY.
-        TTL is refreshed on every write.
+        Atomically append one message and enforce the rolling window.
+
+        Uses a Redis pipeline:
+          RPUSH  key  json_payload   → append to tail
+          LTRIM  key  -MAX_HISTORY 0 → cap list length (keeps newest)
+          EXPIRE key  TTL_SECONDS    → reset TTL
+
+        All three commands execute in a single round-trip with no race.
 
         Parameters
         ----------
@@ -167,44 +161,98 @@ class MemoryService:
         confidence  : Classifier confidence (user turns only)
         is_crisis   : Whether this turn triggered crisis protocol
         """
-        if not self._available:
+        if not self._available or not self._client:
             return
 
         key = self._build_key(session_id)
-        history = await self._safe_get(key)
+        entry = json.dumps(
+            {
+                "role"      : role,
+                "content"   : content,
+                "category"  : category,
+                "confidence": confidence,
+                "is_crisis" : is_crisis,
+                "timestamp" : time.time(),
+            },
+            ensure_ascii=False,
+        )
 
-        entry: dict = {
-            "role"      : role,
-            "content"   : content,
-            "category"  : category,
-            "confidence": confidence,
-            "is_crisis" : is_crisis,
-            "timestamp" : time.time(),
-        }
-        history.append(entry)
+        try:
+            async with self._client.pipeline(transaction=True) as pipe:
+                pipe.rpush(key, entry)
+                pipe.ltrim(key, -MAX_HISTORY, -1)
+                pipe.expire(key, TTL_SECONDS)
+                await pipe.execute()
+        except Exception as exc:
+            self._mark_unavailable(exc, f"Write error for {key}")
 
-        # Enforce the rolling window — remove oldest messages first
-        if len(history) > MAX_HISTORY:
-            history = history[-MAX_HISTORY:]
+    async def append_turn(
+        self,
+        session_id: str,
+        *,
+        user_message: str,
+        ai_message: str,
+        category: str | None = None,
+        confidence: float | None = None,
+    ) -> None:
+        """
+        Atomically write a full user+assistant turn in ONE Redis round-trip.
 
-        await self._safe_set(key, history)
+        Uses a single pipeline:
+          RPUSH key user_entry  → append user message
+          RPUSH key ai_entry    → append assistant message
+          LTRIM key -MAX_HISTORY -1  → enforce rolling window
+          EXPIRE key TTL_SECONDS     → reset TTL
+
+        This halves the Redis network overhead vs. two separate append_message calls.
+        """
+        if not self._available or not self._client:
+            return
+
+        key = self._build_key(session_id)
+        now = time.time()
+
+        user_entry = json.dumps(
+            {"role": "user", "content": user_message, "category": category,
+             "confidence": confidence, "is_crisis": False, "timestamp": now},
+            ensure_ascii=False,
+        )
+        ai_entry = json.dumps(
+            {"role": "assistant", "content": ai_message, "category": None,
+             "confidence": None, "is_crisis": False, "timestamp": now + 0.001},
+            ensure_ascii=False,
+        )
+
+        try:
+            async with self._client.pipeline(transaction=True) as pipe:
+                pipe.rpush(key, user_entry)
+                pipe.rpush(key, ai_entry)
+                pipe.ltrim(key, -MAX_HISTORY, -1)
+                pipe.expire(key, TTL_SECONDS)
+                await pipe.execute()
+        except Exception as exc:
+            self._mark_unavailable(exc, f"Append turn error for {key}")
 
     async def clear_session(self, session_id: str) -> None:
         """Delete all memory for a session (e.g. user deletes conversation)."""
-        if not self._available:
+        if not self._available or not self._client:
             return
         try:
             await self._client.delete(self._build_key(session_id))
         except Exception as exc:
-            logger.warning(f"[MemoryService] Delete error for {session_id}: {exc}")
+            self._mark_unavailable(exc, f"Delete error for {session_id}")
 
     async def ping(self) -> bool:
         """Health-check helper — used by /health endpoint."""
         if not self._client:
             return False
         try:
-            return await self._client.ping()
+            result = await self._client.ping()
+            if result:
+                self._available = True  # restore if Redis recovered
+            return bool(result)
         except Exception:
+            self._available = False
             return False
 
 

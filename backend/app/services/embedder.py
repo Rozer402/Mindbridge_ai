@@ -53,7 +53,7 @@ class MentalHealthEmbedder:
         self.corpus_embeddings = self.model.encode(
             contexts,
             normalize_embeddings=True,
-            show_progress_bar=True,
+            show_progress_bar=False,   # avoid tqdm output in production logs
             batch_size=64,
         )
 

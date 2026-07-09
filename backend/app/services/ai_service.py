@@ -24,7 +24,6 @@ New in this version
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import google.generativeai as genai
 
@@ -34,6 +33,7 @@ from .classifier_service import (
     classifier_service,
     CONFIDENCE_FALLBACK_THRESHOLD,
     CRISIS_CONFIDENCE_THRESHOLD,
+    MIN_WORDS_FOR_CLASSIFIER_TRUST,
 )
 from .memory_service import memory_service, HISTORY_FOR_LLM
 from app.config import settings
@@ -88,12 +88,13 @@ STATIC_EXAMPLES = [
     },
 ]
 
-OFF_TOPIC_RESPONSE = (
-    "I'm here specifically to support your mental and emotional wellbeing. "
-    "It sounds like your question might be about something else — and I may not be "
-    "the best resource for that. Is there something on your mind emotionally "
-    "that I can help with? I'm here to listen. 💙"
-)
+# ── Static system prompt prefix (built once — never rebuilt per request) ─────
+# The static examples are folded in here at module load time.
+# The dynamic few-shot section (retrieved per request) is appended per call.
+_STATIC_PROMPT_PREFIX: str = SYSTEM_PROMPT + "\n\nHere are some examples of how you should respond:\n"
+_STATIC_PROMPT_PREFIX += "\nUser: I feel overwhelmed and don't know what to do.\nMindBridge: That sounds really exhausting — feeling overwhelmed takes so much out of you, and I can hear how heavy this feels right now. You don't have to figure everything out at once. Can you tell me what's weighing on you the most right now?\n"
+_STATIC_PROMPT_PREFIX += "\nUser: I've been anxious about everything lately.\nMindBridge: Anxiety can be so consuming, especially when it feels like it's everywhere at once — like your mind won't let you rest. You're not alone in feeling this way. What situation feels most pressing or difficult for you today?\n"
+_STATIC_PROMPT_PREFIX += "\nUser: I feel like no one understands me.\nMindBridge: That feeling of being misunderstood can be really lonely and painful. You deserve to be heard and seen for who you truly are. Can you tell me more about what's been happening that's made you feel this way?\n"
 
 # ── Crisis detection tuning constants ─────────────────────────────────────────
 # Minimum number of words a message must contain before we trust the
@@ -108,11 +109,19 @@ CRISIS_MAX_UNCERTAINTY = 0.04
 
 # ── Initialisation ────────────────────────────────────────────────────────────
 
+# Cached Gemini model — constructed once at startup without a system_instruction
+# so the same object can serve all requests. The system prompt is injected as
+# the first history turn instead (see Step 6 below).
+_gemini_model: genai.GenerativeModel | None = None
+
+
 def _initialize_gemini() -> None:
-    """Configure Gemini API. Called once at FastAPI startup."""
+    """Configure Gemini API and cache the model object. Called once at startup."""
+    global _gemini_model
     if settings.GEMINI_API_KEY:
         genai.configure(api_key=settings.GEMINI_API_KEY)
-        logger.info("[AI Service] Gemini API configured.")
+        _gemini_model = genai.GenerativeModel("gemini-2.5-flash")
+        logger.info("[AI Service] Gemini API configured and model cached.")
     else:
         logger.warning(
             "[AI Service] No GEMINI_API_KEY found. AI responses will use fallback."
@@ -127,9 +136,13 @@ def _classifier_flags_crisis(
 ) -> bool:
     """
     Classifier only triggers if ALL conditions met:
-      - confidence >= 0.82
-      - uncertainty < 0.04
-      - message length >= 5 words
+      - category == "crisis"
+      - confidence >= CRISIS_CONFIDENCE_THRESHOLD (0.82)
+      - uncertainty < CRISIS_MAX_UNCERTAINTY (0.04)
+      - message length >= CRISIS_MIN_WORD_COUNT (5 words)
+
+    Keyword and embedding checks in crisis_service / embedder run separately
+    and are always authoritative regardless of message length.
     """
     if not classifier_result.get("available"):
         return False
@@ -177,7 +190,21 @@ async def process_message(
     }
     """
     # ── Step 1: Sanitise ──────────────────────────────────────────────────────
+    # The schema validator already strips and caps at 1000 chars.
+    # We re-strip here defensively for calls that bypass the REST layer (e.g. tests).
     user_message = user_message.strip()[:1000]
+    if not user_message:
+        return {
+            "response"              : "I didn't catch that — could you say a bit more? I'm here to listen. 💙",
+            "is_crisis"             : False,
+            "is_relevant"           : False,
+            "relevance_score"       : 0.0,
+            "few_shot_count"        : 0,
+            "predicted_category"    : None,
+            "classifier_confidence" : 0.0,
+            "uncertainty"           : 0.0,
+            "memory_used"           : False,
+        }
     word_count = len(user_message.split())
 
     # ── Step 2: Embed ─────────────────────────────────────────────────────────
@@ -188,9 +215,26 @@ async def process_message(
 
     # ── Step 3.5: Trained classifier ──────────────────────────────────────────
     classifier_result = classifier_service.predict(query_vec)
-    predicted_category  = classifier_result["category"]
+    predicted_category = classifier_result["category"]
     classifier_confidence = classifier_result["confidence"]
     classifier_uncertainty = classifier_result["uncertainty"]
+
+    # Short/meta messages ("yes", "I don't know", "what did I say before?")
+    # carry almost no semantic content — the classifier's confidence number
+    # can look deceptively high on these even though it's effectively
+    # guessing. Below MIN_WORDS_FOR_CLASSIFIER_TRUST words, we don't trust
+    # the classifier's category or crisis signal at all, regardless of
+    # confidence, and fall back to the original keyword/embedding/plain
+    # cosine-similarity behavior.
+    word_count = len(user_message.split())
+    classifier_trusted = word_count >= MIN_WORDS_FOR_CLASSIFIER_TRUST
+
+    classifier_flags_crisis = (
+        classifier_result["available"]
+        and classifier_trusted
+        and predicted_category == "crisis"
+        and classifier_confidence >= CRISIS_CONFIDENCE_THRESHOLD
+    )
 
     # ── Step 4: Crisis detection ──────────────────────────────────────────────
     #   Layer A — keyword match (authoritative, 100% recall on known phrases)
@@ -199,13 +243,12 @@ async def process_message(
     #   Layer B — embedding similarity to corpus crisis vectors
     embedding_crisis = embedder.check_crisis_embedding(query_vec)
 
-    #   Layer C — trained classifier (hardened with length + uncertainty guards)
-    learned_crisis = _classifier_flags_crisis(classifier_result, word_count)
+    final_is_crisis = keyword_crisis or embedding_crisis or classifier_flags_crisis
 
-    if keyword_crisis or embedding_crisis or learned_crisis:
+    if final_is_crisis:
         logger.info(
             f"[AI Service] CRISIS triggered — keyword={keyword_crisis}, "
-            f"embedding={embedding_crisis}, classifier={learned_crisis} | "
+            f"embedding={embedding_crisis}, classifier={classifier_flags_crisis} | "
             f"words={word_count}, conf={classifier_confidence:.3f}, "
             f"unc={classifier_uncertainty:.4f}"
         )
@@ -233,30 +276,31 @@ async def process_message(
     # ── Step 4.5: Suppress confusing classifier output ────────────────────────
     # If the classifier guessed "crisis" but our guards blocked it (e.g. short word count),
     # change the predicted category so the frontend/logs don't misleadingly say "Category=crisis".
-    if predicted_category == "crisis" and not learned_crisis:
+    if predicted_category == "crisis" and not final_is_crisis:
         predicted_category = "ambiguous"
 
     # ── Step 5: Few-shot retrieval ────────────────────────────────────────────
     category_for_retrieval = (
         predicted_category
-        if classifier_result["available"] and classifier_confidence >= CONFIDENCE_FALLBACK_THRESHOLD
+        if (
+            classifier_result["available"]
+            and classifier_trusted
+            and classifier_confidence >= CONFIDENCE_FALLBACK_THRESHOLD
+        )
         else None
     )
     examples = embedder.get_few_shot_examples_by_category(query_vec, category_for_retrieval)
 
     # ── Step 6: Build Gemini prompt & history ─────────────────────────────────
-    
-    # We now inject few-shot examples into the SYSTEM PROMPT instead of the
-    # conversation history. This prevents the LLM from confusing the examples
-    # with the user's actual past messages, dramatically improving context retention!
-    dynamic_system_prompt = SYSTEM_PROMPT + "\n\nHere are some examples of how you should respond:\n"
-    
-    for ex in STATIC_EXAMPLES:
-        dynamic_system_prompt += f"\nUser: {ex['user']}\nMindBridge: {ex['assistant']}\n"
-        
-    for ex in examples:
-        if ex.get("category") != "crisis":
-            dynamic_system_prompt += f"\nUser: {ex['context']}\nMindBridge: {ex['response']}\n"
+
+    # Dynamic portion: only the retrieved few-shot examples change per request.
+    # The static prefix (_STATIC_PROMPT_PREFIX) was built once at module load.
+    dynamic_few_shot = "".join(
+        f"\nUser: {ex['context']}\nMindBridge: {ex['response']}\n"
+        for ex in examples
+        if ex.get("category") != "crisis"
+    )
+    dynamic_system_prompt = _STATIC_PROMPT_PREFIX + dynamic_few_shot
 
     messages: list[dict] = []
 
@@ -279,22 +323,30 @@ async def process_message(
     messages.append({"role": "user", "parts": [user_message]})
 
     # ── Step 7: Generate with Gemini ──────────────────────────────────────────
-    try:
-        if not settings.GEMINI_API_KEY:
-            raise ValueError("No GEMINI_API_KEY configured")
+    # The system prompt is injected as the first "model" turn so that the
+    # cached _gemini_model object (no system_instruction) can be reused
+    # across all requests, regardless of the dynamic few-shot section.
+    full_messages = [
+        {"role": "user",  "parts": ["[System context — read carefully before responding]"]},
+        {"role": "model", "parts": [dynamic_system_prompt]},
+    ] + messages
 
-        model = genai.GenerativeModel(
-            "gemini-2.5-flash",
-            system_instruction=dynamic_system_prompt,
-        )
-        response = model.generate_content(messages)
-        ai_text = response.text
+    try:
+        if not _gemini_model:
+            raise ValueError("Gemini model not initialized — check GEMINI_API_KEY")
+
+        response = _gemini_model.generate_content(full_messages)
+        ai_text = response.text.strip()
+        if not ai_text:
+            raise ValueError("Gemini returned empty response")
 
     except Exception as exc:
         logger.error(f"[AI Service] Gemini error: {exc}")
         # Graceful degradation — prefer the best corpus example response
-        if examples:
-            ai_text = examples[0].get("response", "")
+        # Filter out 'crisis' examples so we don't accidentally return the literal string 'CRISIS'
+        safe_examples = [ex for ex in examples if ex.get("category") != "crisis"]
+        if safe_examples:
+            ai_text = safe_examples[0].get("response", "")
         else:
             ai_text = (
                 "I hear you, and what you're sharing matters. "
@@ -302,27 +354,20 @@ async def process_message(
                 "I'm here to listen. 💙"
             )
 
-    # ── Step 8: Persist to Redis memory ──────────────────────────────────────
-    await memory_service.append_message(
+    # ── Step 8: Persist to Redis memory (single pipeline, both messages) ─────
+    await memory_service.append_turn(
         session_id,
-        role="user",
-        content=user_message,
+        user_message=user_message,
+        ai_message=ai_text,
         category=predicted_category,
         confidence=classifier_confidence,
-        is_crisis=False,
-    )
-    await memory_service.append_message(
-        session_id,
-        role="assistant",
-        content=ai_text,
-        is_crisis=False,
     )
 
     # ── Step 9: Return enriched payload ──────────────────────────────────────
     return {
         "response"              : ai_text,
         "is_crisis"             : False,
-        "is_relevant"           : True,
+        "is_relevant"           : is_relevant,   # actual check result, not hardcoded True
         "relevance_score"       : relevance_score,
         "few_shot_count"        : len(examples),
         "predicted_category"    : predicted_category,

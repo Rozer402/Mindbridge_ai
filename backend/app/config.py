@@ -7,13 +7,13 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://postgres:password@localhost:5432/mindbridge"
 
     # ── JWT Auth ──────────────────────────────────────────────────────────────
-    JWT_SECRET_KEY: str = "dev-secret-key-change-in-production-minimum-32-chars-long"
+    JWT_SECRET_KEY: str  # No default — must be set in .env / environment
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
 
     # ── AI (Gemini) ───────────────────────────────────────────────────────────
-    GEMINI_API_KEY: str = "AIzaSyDDaILHPolFf1kJ8RpM2L-xx6dSxljm1qQ"
+    GEMINI_API_KEY: str  # No default — must be set in .env / environment
 
     # ── Redis (conversation memory) ───────────────────────────────────────────
     # docker-compose adds Redis on port 6379 by default.
