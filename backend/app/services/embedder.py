@@ -101,6 +101,35 @@ class MentalHealthEmbedder:
         top_indices = np.argsort(sims)[::-1][:self.TOP_K]
         return [self.corpus_data[i] for i in top_indices]
 
+    def get_few_shot_examples_by_category(
+        self, query_vec: np.ndarray, category: str | None, top_k: int | None = None
+    ) -> list[dict]:
+        """
+        Category-aware retrieval, used when the trained classifier (Phase 2/3)
+        is confident about a predicted category. Retrieves top-K examples
+        FROM THAT CATEGORY ONLY, ranked by cosine similarity within it.
+
+        Falls back to the original full-corpus behavior (get_few_shot_examples)
+        if: category is None, unknown, "crisis" (crisis examples are never used
+        as few-shot generation examples), or has fewer than top_k entries.
+        """
+        top_k = top_k or self.TOP_K
+        if self.corpus_embeddings is None or len(self.corpus_embeddings) == 0:
+            return []
+
+        if category and category != "crisis":
+            cat_indices = [
+                i for i, d in enumerate(self.corpus_data) if d.get("category") == category
+            ]
+            if len(cat_indices) >= top_k:
+                cat_embeddings = self.corpus_embeddings[cat_indices]
+                sims = cosine_similarity([query_vec], cat_embeddings)[0]
+                top_local = np.argsort(sims)[::-1][:top_k]
+                return [self.corpus_data[cat_indices[i]] for i in top_local]
+
+        # Fallback: original full-corpus cosine similarity
+        return self.get_few_shot_examples(query_vec)
+
 
 # Singleton — initialized once at FastAPI startup
 embedder = MentalHealthEmbedder()

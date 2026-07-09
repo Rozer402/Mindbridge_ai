@@ -7,14 +7,29 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: mindbridge
     ports:
-      - "5435:5432"   # 5435 on host — Windows postgres already uses 5432 and 5433
+      - "5435:5432" # 5435 on host — Windows postgres already uses 5432 and 5433
     volumes:
       - mindbridge_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d mindbridge"]
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d mindbridge" ]
       interval: 5s
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: mindbridge-redis
+    command: redis-server --appendonly yes # AOF persistence (survives restarts)
+    ports:
+      - "6380:6380"
+    volumes:
+      - mindbridge_redisdata:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
 volumes:
   mindbridge_pgdata:
+  mindbridge_redisdata:

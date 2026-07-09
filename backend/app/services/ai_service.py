@@ -1,18 +1,46 @@
 """
 AI Service — Main Orchestrator
-Implements the full 8-step pipeline from the IEEE ICDSBS 2025 paper:
-1. Embed → 2. Relevance Check → 3. Crisis Detection →
-4. Few-Shot Retrieval → 5. Build Prompt → 6. Generate → 7. Stream → 8. Persist
+===============================
+Implements the full pipeline from the IEEE ICDSBS 2025 paper:
+  1. Sanitise → 2. Embed → 3. Relevance check → 4. Crisis detection
+  → 5. Few-shot retrieval → 6. Build Gemini history (with memory)
+  → 7. Generate → 8. Store to memory → 9. Return enriched payload
+
+New in this version
+-------------------
+* Redis-backed persistent memory (via MemoryService)
+  - Loads last HISTORY_FOR_LLM turns from Redis before building the prompt.
+  - Persists both the user message and the AI response after every turn.
+* Improved crisis detection (false-positive hardening)
+  - Min 5-word guard: classifier crisis flag is IGNORED for very short input.
+  - Raised CRISIS_CONFIDENCE_THRESHOLD (0.55 → 0.78, set in classifier_service.py).
+  - Uncertainty guard: classifier crisis flag is also IGNORED when uncertainty ≥ 0.05.
+  - Keyword + embedding checks are ALWAYS authoritative regardless of length.
+* Enriched return payload:
+    { response, is_crisis, is_relevant, relevance_score, few_shot_count,
+      predicted_category, classifier_confidence, uncertainty, memory_used }
 """
 
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
 import google.generativeai as genai
+
 from .embedder import embedder
 from .crisis_service import is_crisis_message, CRISIS_RESPONSE
+from .classifier_service import (
+    classifier_service,
+    CONFIDENCE_FALLBACK_THRESHOLD,
+    CRISIS_CONFIDENCE_THRESHOLD,
+)
+from .memory_service import memory_service, HISTORY_FOR_LLM
 from app.config import settings
-import logging
 
 logger = logging.getLogger(__name__)
 
+# ── System Prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are MindBridge, a compassionate AI mental health companion. Your role is to provide empathetic, supportive, non-judgmental responses to people dealing with mental health challenges.
 
 Core principles:
@@ -26,23 +54,38 @@ Core principles:
 - Never minimize feelings — everything the user shares matters
 
 Topic steering & Context:
+- CONVERSATION MEMORY: You are continuing an ongoing conversation. You will receive the recent conversation history. You MUST read it carefully and remember the original topic.
+- If the user uses pronouns like "it", "they", or "this", strictly refer to the conversation history to understand the context. Do not lose the thread.
 - Maintain conversation continuity. Always factor in previous messages.
 - If the user asks something completely off-topic (like coding, math, or random trivia), respond politely but gently steer the conversation back to their emotional state or wellbeing. Do not abruptly reject them.
 - You are NOT a replacement for therapy. You are a first point of empathetic support."""
 
+# ── Static few-shot seed examples (always injected, model never changes them) ─
 STATIC_EXAMPLES = [
     {
         "user": "I feel overwhelmed and don't know what to do.",
-        "assistant": "That sounds really exhausting — feeling overwhelmed takes so much out of you, and I can hear how heavy this feels right now. You don't have to figure everything out at once. Can you tell me what's weighing on you the most right now?"
+        "assistant": (
+            "That sounds really exhausting — feeling overwhelmed takes so much out of you, "
+            "and I can hear how heavy this feels right now. You don't have to figure everything "
+            "out at once. Can you tell me what's weighing on you the most right now?"
+        ),
     },
     {
         "user": "I've been anxious about everything lately.",
-        "assistant": "Anxiety can be so consuming, especially when it feels like it's everywhere at once — like your mind won't let you rest. You're not alone in feeling this way. What situation feels most pressing or difficult for you today?"
+        "assistant": (
+            "Anxiety can be so consuming, especially when it feels like it's everywhere at once "
+            "— like your mind won't let you rest. You're not alone in feeling this way. What "
+            "situation feels most pressing or difficult for you today?"
+        ),
     },
     {
         "user": "I feel like no one understands me.",
-        "assistant": "That feeling of being misunderstood can be really lonely and painful. You deserve to be heard and seen for who you truly are. Can you tell me more about what's been happening that's made you feel this way?"
-    }
+        "assistant": (
+            "That feeling of being misunderstood can be really lonely and painful. You deserve "
+            "to be heard and seen for who you truly are. Can you tell me more about what's been "
+            "happening that's made you feel this way?"
+        ),
+    },
 ]
 
 OFF_TOPIC_RESPONSE = (
@@ -52,98 +95,206 @@ OFF_TOPIC_RESPONSE = (
     "that I can help with? I'm here to listen. 💙"
 )
 
+# ── Crisis detection tuning constants ─────────────────────────────────────────
+# Minimum number of words a message must contain before we trust the
+# CLASSIFIER's crisis prediction.  Keyword & embedding checks always run
+# regardless of message length — they are the authoritative safety net.
+CRISIS_MIN_WORD_COUNT = 5
 
-def _initialize_gemini():
-    """Configure Gemini API. Call once at startup."""
+# Maximum MC Dropout uncertainty allowed for the classifier crisis flag to count.
+# High uncertainty means the model is "guessing" — don't penalise the user for it.
+CRISIS_MAX_UNCERTAINTY = 0.04
+
+
+# ── Initialisation ────────────────────────────────────────────────────────────
+
+def _initialize_gemini() -> None:
+    """Configure Gemini API. Called once at FastAPI startup."""
     if settings.GEMINI_API_KEY:
         genai.configure(api_key=settings.GEMINI_API_KEY)
         logger.info("[AI Service] Gemini API configured.")
     else:
-        logger.warning("[AI Service] No GEMINI_API_KEY found. AI responses will use fallback.")
+        logger.warning(
+            "[AI Service] No GEMINI_API_KEY found. AI responses will use fallback."
+        )
 
+
+# ── Crisis guard ──────────────────────────────────────────────────────────────
+
+def _classifier_flags_crisis(
+    classifier_result: dict,
+    word_count: int,
+) -> bool:
+    """
+    Classifier only triggers if ALL conditions met:
+      - confidence >= 0.82
+      - uncertainty < 0.04
+      - message length >= 5 words
+    """
+    if not classifier_result.get("available"):
+        return False
+
+    if (
+        classifier_result["category"] == "crisis" and
+        classifier_result["confidence"] >= CRISIS_CONFIDENCE_THRESHOLD and
+        classifier_result.get("uncertainty", 1.0) < CRISIS_MAX_UNCERTAINTY and
+        word_count >= CRISIS_MIN_WORD_COUNT
+    ):
+        return True
+
+    return False
+
+
+# ── Main pipeline ─────────────────────────────────────────────────────────────
 
 async def process_message(
     user_message: str,
-    session_history: list[dict]
+    session_id: str,
+    session_history: list[dict],   # DB history (fallback when Redis unavailable)
 ) -> dict:
     """
-    Full AI pipeline. Returns:
+    Full AI pipeline.
+
+    Parameters
+    ----------
+    user_message    : Raw user input (will be trimmed + capped at 1 000 chars)
+    session_id      : Chat session UUID string — used as Redis memory key
+    session_history : Messages loaded from PostgreSQL (used as fallback when
+                      Redis memory is not available)
+
+    Returns
+    -------
     {
-        "response": str,
-        "is_crisis": bool,
-        "is_relevant": bool,
-        "relevance_score": float,
-        "few_shot_count": int
+        "response"              : str,
+        "is_crisis"             : bool,
+        "is_relevant"           : bool,
+        "relevance_score"       : float,
+        "few_shot_count"        : int,
+        "predicted_category"    : str | None,
+        "classifier_confidence" : float,
+        "uncertainty"           : float,
+        "memory_used"           : bool,   # True when Redis history was injected
     }
     """
-    # Step 1: Sanitize input
+    # ── Step 1: Sanitise ──────────────────────────────────────────────────────
     user_message = user_message.strip()[:1000]
+    word_count = len(user_message.split())
 
-    # Step 2: Embed the message
+    # ── Step 2: Embed ─────────────────────────────────────────────────────────
     query_vec = embedder.embed(user_message)
 
-    # Step 3: Relevance Check (Soft tracking only)
+    # ── Step 3: Relevance check (soft — LLM steers off-topic, not hard-block) ─
     is_relevant, relevance_score = embedder.check_relevance(query_vec)
-    
-    # We no longer hard-reject based on relevance_score. 
-    # Hard-filtering breaks conversation continuity (e.g. "I don't know", "Yes", or follow-up questions).
-    # Instead, we let the LLM system prompt handle gentle steering if the topic truly drifts.
 
-    # Step 4: Crisis detection (keyword + embedding)
-    if is_crisis_message(user_message) or embedder.check_crisis_embedding(query_vec):
+    # ── Step 3.5: Trained classifier ──────────────────────────────────────────
+    classifier_result = classifier_service.predict(query_vec)
+    predicted_category  = classifier_result["category"]
+    classifier_confidence = classifier_result["confidence"]
+    classifier_uncertainty = classifier_result["uncertainty"]
+
+    # ── Step 4: Crisis detection ──────────────────────────────────────────────
+    #   Layer A — keyword match (authoritative, 100% recall on known phrases)
+    keyword_crisis = is_crisis_message(user_message)
+
+    #   Layer B — embedding similarity to corpus crisis vectors
+    embedding_crisis = embedder.check_crisis_embedding(query_vec)
+
+    #   Layer C — trained classifier (hardened with length + uncertainty guards)
+    learned_crisis = _classifier_flags_crisis(classifier_result, word_count)
+
+    if keyword_crisis or embedding_crisis or learned_crisis:
+        logger.info(
+            f"[AI Service] CRISIS triggered — keyword={keyword_crisis}, "
+            f"embedding={embedding_crisis}, classifier={learned_crisis} | "
+            f"words={word_count}, conf={classifier_confidence:.3f}, "
+            f"unc={classifier_uncertainty:.4f}"
+        )
+        # Persist user message as crisis turn BEFORE returning
+        await memory_service.append_message(
+            session_id,
+            role="user",
+            content=user_message,
+            category=predicted_category,
+            confidence=classifier_confidence,
+            is_crisis=True,
+        )
         return {
-            "response": CRISIS_RESPONSE,
-            "is_crisis": True,
-            "is_relevant": True,
-            "relevance_score": relevance_score,
-            "few_shot_count": 0
+            "response"              : CRISIS_RESPONSE,
+            "is_crisis"             : True,
+            "is_relevant"           : True,
+            "relevance_score"       : relevance_score,
+            "few_shot_count"        : 0,
+            "predicted_category"    : predicted_category,
+            "classifier_confidence" : classifier_confidence,
+            "uncertainty"           : classifier_uncertainty,
+            "memory_used"           : memory_service.available,
         }
+    
+    # ── Step 4.5: Suppress confusing classifier output ────────────────────────
+    # If the classifier guessed "crisis" but our guards blocked it (e.g. short word count),
+    # change the predicted category so the frontend/logs don't misleadingly say "Category=crisis".
+    if predicted_category == "crisis" and not learned_crisis:
+        predicted_category = "ambiguous"
 
-    # Step 5: Retrieve dynamic few-shot examples
-    examples = embedder.get_few_shot_examples(query_vec)
+    # ── Step 5: Few-shot retrieval ────────────────────────────────────────────
+    category_for_retrieval = (
+        predicted_category
+        if classifier_result["available"] and classifier_confidence >= CONFIDENCE_FALLBACK_THRESHOLD
+        else None
+    )
+    examples = embedder.get_few_shot_examples_by_category(query_vec, category_for_retrieval)
 
-    # Step 6: Build Gemini message history
-    messages = []
-
-    # Static examples (always included)
+    # ── Step 6: Build Gemini prompt & history ─────────────────────────────────
+    
+    # We now inject few-shot examples into the SYSTEM PROMPT instead of the
+    # conversation history. This prevents the LLM from confusing the examples
+    # with the user's actual past messages, dramatically improving context retention!
+    dynamic_system_prompt = SYSTEM_PROMPT + "\n\nHere are some examples of how you should respond:\n"
+    
     for ex in STATIC_EXAMPLES:
-        messages.append({"role": "user", "parts": [ex["user"]]})
-        messages.append({"role": "model", "parts": [ex["assistant"]]})
-
-    # Dynamic examples (retrieved by embedding similarity)
+        dynamic_system_prompt += f"\nUser: {ex['user']}\nMindBridge: {ex['assistant']}\n"
+        
     for ex in examples:
-        if ex.get("category") != "crisis":  # Never use crisis examples as few-shot
-            messages.append({"role": "user", "parts": [ex["context"]]})
-            messages.append({"role": "model", "parts": [ex["response"]]})
+        if ex.get("category") != "crisis":
+            dynamic_system_prompt += f"\nUser: {ex['context']}\nMindBridge: {ex['response']}\n"
 
-    # Session history (last 8 messages for context window)
-    for msg in session_history[-8:]:
-        role = "user" if msg["role"] == "user" else "model"
-        messages.append({"role": role, "parts": [msg["content"]]})
+    messages: list[dict] = []
 
-    # Current user message
+    # 6a — Recent conversation memory (Redis → PostgreSQL fallback)
+    redis_history = await memory_service.get_history(session_id, limit=HISTORY_FOR_LLM)
+    memory_used = bool(redis_history) or bool(session_history)
+
+    if redis_history:
+        # Redis memory is available — use it (most up-to-date)
+        for msg in redis_history:
+            role = "user" if msg["role"] == "user" else "model"
+            messages.append({"role": role, "parts": [msg["content"]]})
+    else:
+        # Fallback to PostgreSQL session history
+        for msg in session_history[-HISTORY_FOR_LLM:]:
+            role = "user" if msg["role"] == "user" else "model"
+            messages.append({"role": role, "parts": [msg["content"]]})
+
+    # 6b — Current user message (always last)
     messages.append({"role": "user", "parts": [user_message]})
 
-    # Step 7: Generate with Gemini
+    # ── Step 7: Generate with Gemini ──────────────────────────────────────────
     try:
         if not settings.GEMINI_API_KEY:
-            raise ValueError("No API key")
+            raise ValueError("No GEMINI_API_KEY configured")
 
         model = genai.GenerativeModel(
             "gemini-2.5-flash",
-            system_instruction=SYSTEM_PROMPT
+            system_instruction=dynamic_system_prompt,
         )
         response = model.generate_content(messages)
         ai_text = response.text
 
-    except Exception as e:
-        logger.error(f"[AI Service] Gemini error: {e}")
-        # Graceful fallback — use the best few-shot example response if available
+    except Exception as exc:
+        logger.error(f"[AI Service] Gemini error: {exc}")
+        # Graceful degradation — prefer the best corpus example response
         if examples:
             ai_text = examples[0].get("response", "")
-        elif session_history:
-            # Mirror empathy from a static example
-            ai_text = STATIC_EXAMPLES[0]["assistant"]
         else:
             ai_text = (
                 "I hear you, and what you're sharing matters. "
@@ -151,10 +302,31 @@ async def process_message(
                 "I'm here to listen. 💙"
             )
 
+    # ── Step 8: Persist to Redis memory ──────────────────────────────────────
+    await memory_service.append_message(
+        session_id,
+        role="user",
+        content=user_message,
+        category=predicted_category,
+        confidence=classifier_confidence,
+        is_crisis=False,
+    )
+    await memory_service.append_message(
+        session_id,
+        role="assistant",
+        content=ai_text,
+        is_crisis=False,
+    )
+
+    # ── Step 9: Return enriched payload ──────────────────────────────────────
     return {
-        "response": ai_text,
-        "is_crisis": False,
-        "is_relevant": True,
-        "relevance_score": relevance_score,
-        "few_shot_count": len(examples)
+        "response"              : ai_text,
+        "is_crisis"             : False,
+        "is_relevant"           : True,
+        "relevance_score"       : relevance_score,
+        "few_shot_count"        : len(examples),
+        "predicted_category"    : predicted_category,
+        "classifier_confidence" : classifier_confidence,
+        "uncertainty"           : classifier_uncertainty,
+        "memory_used"           : memory_used,
     }

@@ -21,12 +21,25 @@ class MessageResponse(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    # Core response
     response: str
+    session_id: uuid.UUID
+
+    # Safety signals
     is_crisis: bool
+
+    # Relevance / retrieval metadata
     is_relevant: bool
     relevance_score: float
     few_shot_count: int
-    session_id: uuid.UUID
+
+    # Classifier enrichment (None when model not yet trained)
+    predicted_category: str | None = None
+    classifier_confidence: float = 0.0
+    uncertainty: float = 0.0
+
+    # Memory
+    memory_used: bool = False
 
 
 class SessionResponse(BaseModel):
