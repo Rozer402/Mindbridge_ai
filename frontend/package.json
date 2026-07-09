@@ -17,7 +17,7 @@
     "recharts": "^2.12.7",
     "react-hook-form": "^7.51.5",
     "zod": "^3.23.8",
-    "@hookform/resolvers": "^3.3.4",
+    "@hookform/resolvers": "^5.4.0",
     "lucide-react": "^0.383.0",
     "clsx": "^2.1.1",
     "tailwind-merge": "^2.3.0",
